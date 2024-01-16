@@ -1,0 +1,251 @@
+#define R1  46.2F
+#define R2  32.86F
+#define VDK  (R2/(R1+R2))
+#define BAT_FUL 6
+#define BAT_LOW 5
+#define AN_BAT  A7               // voltage reading
+
+#include <ArduinoBLE.h>          // Arduino BLE library
+#include <Arduino_LSM6DS3.h>     // Use Arduino library for the IMU on the Nano 33 IOT
+
+Uart Serial1( &sercom5, PIN_SERIAL1_RX, PIN_SERIAL1_TX, PAD_SERIAL1_RX, PAD_SERIAL1_TX );
+void SERCOM5_Handler(){
+Serial1.IrqHandler();
+}
+
+// UUid for Service
+const char* UUID_serv = "84582cd0-3df0-4e73-9496-29010d7445dd";
+// UUids for accelerometer characteristics (I separated x, y and z values)
+const char* UUID_ax   = "84582cd1-3df0-4e73-9496-29010d7445dd";
+const char* UUID_ay   = "84582cd2-3df0-4e73-9496-29010d7445dd";
+const char* UUID_az   = "84582cd3-3df0-4e73-9496-29010d7445dd";
+// UUids for gyroscope characteristics (as above)
+const char* UUID_gx   = "84582cd4-3df0-4e73-9496-29010d7445dd";
+const char* UUID_gy   = "84582cd5-3df0-4e73-9496-29010d7445dd";
+const char* UUID_gz   = "84582cd6-3df0-4e73-9496-29010d7445dd";
+// UUid for battery values (bap=percent, ba=voltage)
+const char* UUID_bap  = "84582cd7-3df0-4e73-9496-29010d7445dd";
+const char* UUID_ba   = "84582cd8-3df0-4e73-9496-29010d7445dd";
+
+BLEService myService(UUID_serv);     // BLE Service
+
+// BLE Characteristics
+BLEFloatCharacteristic  chAX(UUID_ax,  BLERead|BLENotify);
+BLEFloatCharacteristic  chAY(UUID_ay,  BLERead|BLENotify);
+BLEFloatCharacteristic  chAZ(UUID_az,  BLERead|BLENotify);
+BLEFloatCharacteristic  chGX(UUID_gx,  BLERead|BLENotify);
+BLEFloatCharacteristic  chGY(UUID_gy,  BLERead|BLENotify);
+BLEFloatCharacteristic  chGZ(UUID_gz,  BLERead|BLENotify);
+BLEFloatCharacteristic chBAP(UUID_bap, BLERead|BLENotify);
+BLEFloatCharacteristic  chBA(UUID_ba,  BLERead|BLENotify);
+
+const byte nitro[] = {0x01,0x03, 0x00, 0x1E, 0x00, 0x01, 0xE4, 0x0C};
+const byte phos[] = {0x01,0x03, 0x00, 0x1F, 0x00, 0x01, 0xB5, 0xCC};
+const byte pota[] = {0x01,0x03, 0x00, 0x20, 0x00, 0x01, 0x85, 0xC0};
+
+byte values[8];
+
+void setup() {
+  Serial.begin(9600);
+  Serial1.begin(9600);
+  uint32_t t=millis();
+  while (!Serial) // wait 5 seconds for serial connection
+    {
+    if ((millis()-t) > 5000) break;
+    }
+  bool err=false;
+  pinMode(LED_BUILTIN, OUTPUT); // onboard led
+  digitalWrite(LED_BUILTIN, LOW); // led off
+
+  // init IMU
+  if (!IMU.begin()) 
+    {
+    Serial.println("IMU: failed");
+    err=true;
+    }
+  Serial.println("IMU: ok");
+
+  // init BLE
+  if (!BLE.begin()) 
+    {
+    err=true;
+    }
+
+  // error: flash led forever
+  if (err)
+    {
+    while(1)
+      {
+      digitalWrite(LED_BUILTIN, HIGH); // led on
+      delay(500);
+      digitalWrite(LED_BUILTIN, LOW); // led off
+      delay(500);  
+      } 
+    }
+
+  BLE.setLocalName("Settorezero_IMU");      // Set BLE name
+  BLE.setDeviceName("Arduino"); // Arduino is the default value on this module
+  
+ BLE.setAdvertisedService(myService);           // Set advertised Service
+  
+  // Add characteristics to the Service
+  myService.addCharacteristic(chAX);
+  myService.addCharacteristic(chAY);
+  myService.addCharacteristic(chAZ);
+  myService.addCharacteristic(chGX);
+  myService.addCharacteristic(chGY);
+  myService.addCharacteristic(chGZ);
+  myService.addCharacteristic(chBAP);
+  myService.addCharacteristic(chBA);
+  
+  // add service to BLE
+  BLE.addService(myService);
+  
+  // characteristics initial values
+  chAX.writeValue(0);
+  chAY.writeValue(0);
+  chAZ.writeValue(0);
+  chGX.writeValue(0);
+  chGY.writeValue(0);
+  chGZ.writeValue(0);
+  chBAP.writeValue(0);
+  chBA.writeValue(0);
+ 
+  // start advertising
+  BLE.advertise();
+  Serial.println("Advertising started");
+  }
+
+void loop(){
+      byte val1,val2,val3;
+  val1 = nitrogen();
+  delay(1000);
+  val2 = phosphorous();
+  delay(1000);
+  val3 = potassium();
+  delay(1000);
+
+  static long preMillis = 0;
+  
+  BLEDevice central = BLE.central();      // listen for BLE centrals devices
+
+ if (central)                              // central device connected?
+    {
+    digitalWrite(LED_BUILTIN, HIGH); // turn on the onboard led
+        
+    while (central.connected())    // while the central is still connected to peripheral:
+      { 
+      long curMillis = millis();
+      if (preMillis>curMillis) preMillis=0; // millis() rollover?
+      if (curMillis - preMillis >= 10) // check values every 10mS
+        {
+        preMillis = curMillis;
+        updateValues(); // call function for updating value to send to central
+        }
+      } 
+    digitalWrite(LED_BUILTIN, LOW);
+       }
+}
+
+void updateValues(){
+  uint8_t averages=10; // average on this values count (accelerometer and gyroscope)
+  uint16_t b_averages=500; // average for battery
+  
+  // accelerometer averaged values/actual values
+  static float ax=0;
+  static float ay=0;
+  static float az=0;
+  float ax1, ay1, az1;
+  
+  // gyroscope averaged values/actual values
+  static float gx=0;
+  static float gy=0;
+  static float gz=0;
+  float gx1, gy1, gz1; 
+  
+  // battery averaged value/actual value
+  static float anBa=0;
+  float anBa1; 
+ 
+  static uint8_t i_a=0; // accelerometer readings counter
+   static uint16_t i_b=0; // battery readings counter
+  
+  // read accelerometer values if available
+  if (IMU.accelerationAvailable()) 
+    {
+    i_a++;
+    IMU.readAcceleration(ax1, ay1, az1);
+    ax+=ax1;
+    ay+=ay1;
+    az+=az1;
+    if (i_a==averages) // send average over BLE
+      {
+      chAX.writeValue(nitrogen());        //Serial.println("Accelerometer: "+String(ax)+","+String(ay)+","+String(az));
+      chAY.writeValue(phosphorous());
+      chAZ.writeValue(potassium()); 
+      ax=0;
+      ay=0;
+      az=0;
+      i_a=0;
+      }
+    }
+
+    IMU.readGyroscope(gx1, gy1, gz1);
+     gx=0;
+     gy=0;
+     gz=0;
+  
+// read battery value
+  anBa1=analogRead(AN_BAT);
+  anBa+=anBa1;
+  i_b++;
+  if (i_b==b_averages)
+    {
+    anBa/=b_averages;                    // averaged analog value
+    float voltage=anBa*(3.3/1023);      // voltage on pin (if 3.3V => ADC gives 1023)
+    voltage=voltage/VDK;                // real voltage on the voltage divider input = battery voltage
+    
+    chBA.writeValue(voltage);           // send voltage in V to BLE
+   
+    voltage-=BAT_LOW; 
+    voltage/=(BAT_FUL-BAT_LOW); 
+    anBa=voltage*100;
+    
+    if (anBa<0) anBa=0;                   // keep percent value in the range 0-100
+    else if (anBa>100) anBa=100;
+
+    chBAP.writeValue(anBa);              // percent voltage  // send % value to BLE
+   i_b=0;
+    anBa=0;
+    }
+}
+
+byte nitrogen(){
+  delay(100);
+   if(Serial1.write(nitro,sizeof(nitro))==8){
+    for(int i=0;i<7;i++){
+      values[i] = Serial1.read();
+    }
+  }
+  return values[4];
+}
+
+byte phosphorous(){
+  delay(100);
+  if(Serial1.write(phos,sizeof(phos))==8){
+    for(byte i=0;i<7;i++){
+    values[i] = Serial1.read();
+    }
+   }
+  return values[4];
+}
+ 
+byte potassium(){
+  delay(100);
+    if(Serial1.write(pota,sizeof(pota))==8){
+       for(byte i=0;i<7;i++){
+        values[i] = Serial1.read();
+       }
+  }
+  return values[4];
+}

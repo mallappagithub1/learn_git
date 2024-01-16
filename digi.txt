@@ -1,0 +1,29 @@
+#define LED_BUILTIN 5
+#define VOLTAGE_PIN A0  
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);       
+  Serial.begin(9600);                 
+}
+
+void loop() {
+  
+  int sensorValue = analogRead(VOLTAGE_PIN);    
+  float voltage = sensorValue * (5.0 / 1023.0);    
+//Serial.print("Voltage: ");Serial.println(voltage);
+
+//if(voltage>2.5 ){
+
+//if(voltage<=0){
+ //Serial.println(voltage == 0 ? "voltage is high" : "voltage is low");
+  digitalWrite(LED_BUILTIN, HIGH);   
+ Serial.println("HIGH");
+  delay(10000);                      
+//}else(voltage>0){
+//}else{
+  digitalWrite(LED_BUILTIN, LOW);    
+  Serial.println("LOW");
+  delay(10000);                      
+ //}
+// }
+}
